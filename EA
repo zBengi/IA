@@ -1,0 +1,374 @@
+// =====================================================================
+// Algoritmo Evolutivo (EA) con Función Rastrigin 2D
+// INFO257 Inteligencia Artificial
+//
+//  EA = simulacion de la evolución natural:
+//   1. SELECCIÓN   - los más aptos tienen más probabilidad de reproducirse
+//   2. CRUZAMIENTO - dos padres combinan su información genética
+//   3. MUTACIÓN    - pequeños cambios aleatorios mantienen la diversidad
+//   4. REINSERCIÓN - la nueva generación reemplaza a la antigua
+// =====================================================================
+
+// -----------------------------------------------------------------------
+// PARÁMETROS DEL ALGORITMO (ajustables)
+// -----------------------------------------------------------------------
+int    N         = 100;   // tamaño de la población
+int    MAX_GEN   = 200;   // generaciones máximas
+float  MUT_RANGO = 0.3;   // desviación estándar de la mutación gaussiana
+                          // (qué tan lejos puede "saltar" un individuo)
+float  MUT_PROB  = 0.2;   // probabilidad de que un hijo mute (0.0 a 1.0)
+int    K         = 5;     // tamaño del torneo (si se usa torneo)
+boolean RULETA   = true;  // true = Ruleta, false = Torneo
+
+// -----------------------------------------------------------------------
+// DOMINIO DE BÚSQUEDA (rango -3 a 7)
+// -----------------------------------------------------------------------
+float X_MIN = -3, X_MAX = 7;
+float Y_MIN = -3, Y_MAX = 7;
+
+// -----------------------------------------------------------------------
+// ESTADO GLOBAL
+// -----------------------------------------------------------------------
+Individuo[] poblacion;  // arreglo de individuos
+float gbestx, gbesty;   // coordenadas del mejor global encontrado
+float gbest;            // fitness del mejor global (queremos minimizar)
+int   generacion = 0;   // contador de generaciones
+boolean corriendo = false; // controla si avanza automáticamente
+float d = 8;            // diámetro de cada individuo en pantalla
+
+// -----------------------------------------------------------------------
+// IMAGEN DE FONDO (mapa de calor de Rastrigin, generada en setup)
+// -----------------------------------------------------------------------
+PImage surf;
+
+// =====================================================================
+// CLASE INDIVIDUO
+// Equivalente a la clase Particle del PSO, pero para EA.
+// Un individuo es simplemente una posición (x, y) en el espacio de búsqueda.
+// =====================================================================
+class Individuo {
+  float x, y;  // posición actual = la "solución" que representa
+  float fit;   // fitness = f(x,y) de Rastrigin (que sea lo más bajo posible)
+
+  // ---- Constructor: posición aleatoria dentro del dominio ----
+  Individuo() { // nace en posicion aleatoria
+    x   = random(X_MIN, X_MAX);
+    y   = random(Y_MIN, Y_MAX);
+    fit = evaluar();  // calcula su fitness al nacer
+  }
+
+  // ---- Constructor con posición específica (para hijos) ----
+  Individuo(float px, float py) { // nace en posicion dada (hijos)
+    // constrain() asegura que el individuo no salga del dominio
+    x   = constrain(px, X_MIN, X_MAX);
+    y   = constrain(py, Y_MIN, Y_MAX);
+    fit = evaluar();
+  }
+
+  // ---- Evalua el individuo: calcula Rastrigin(x, y) ----
+  // Rastrigin 2D: f(x,y) = 20 + x²-10cos(2πx) + y²-10cos(2πy)
+  // El minimo global está en f(0,0)=0. Buscamos llegar ahí.
+  float evaluar() {
+    fit = 20
+        + (x*x - 10*cos(TWO_PI*x)) // Rastrigin en x
+        + (y*y - 10*cos(TWO_PI*y)); // Rastrigin en y
+
+    // Mejor global encontrado hasta ahora?
+    if (fit < gbest) {
+      gbest  = fit;
+      gbestx = x;
+      gbesty = y;
+    }
+    return fit;
+  }
+
+  // ---- Dibuja el individuo en pantalla ----
+  void display() {
+    // Color segun su fitness: amarillo = bueno (fit bajo), azul = malo (fit alto)
+    // Normalizamos entre 0 y 80 (rango tipico de Rastrigin en este dominio)
+    float t = constrain(map(fit, 0, 80, 0, 1), 0, 1);
+    color c = lerpColor(
+      color(255, 220, 50, 220), // Amarillo = bueno (fit bajo)
+      color(30, 80, 200, 150), // Azul = malo (fit alto)
+      t);
+    fill(c);
+    noStroke();
+    ellipse(x2px(x), y2py(y), d, d);
+  }
+}
+
+// =====================================================================
+// SETUP - se ejecuta una sola vez al inicio
+// =====================================================================
+void setup() {
+  size(800, 600); 
+  surf = generarMapaCalor(); // Genera la imagen de fondo (mapa de calor de Rastrigin)
+  inicializar(); // Inicializa la poblacion y el mejor global
+}
+
+// =====================================================================
+// DRAW - se ejecuta en loop
+// =====================================================================
+void draw() {
+  image(surf, 0, 0, width, height); // Dibuja el mapa de calor
+
+  for (Individuo ind : poblacion) {
+    ind.display(); // Dibuja cada individuo de la población
+  }
+
+  mostrarBest(); // Dibuja el mejor global (cruz roja)
+  mostrarInfo(); // Muestra estadísticas en pantalla
+
+  // Si está en modo automatico, avanza una generación por frame
+  if (corriendo && generacion < MAX_GEN) {
+    siguienteGeneracion();
+  }
+}
+
+// =====================================================================
+// ALGORITMO EVOLUTIVO
+// =====================================================================
+
+// ---- Inicializa / reinicia la población ----
+void inicializar() {
+  poblacion  = new Individuo[N];
+  gbest      = Float.MAX_VALUE; // reset: aún no hay mejor (buscamos minimo)
+  gbestx     = 0;
+  gbesty     = 0;
+  generacion = 0;
+  corriendo  = false;
+
+  for (int i = 0; i < N; i++) {
+    poblacion[i] = new Individuo(); // posicion aleatoria
+  }
+}
+
+// ---- Ejecuta una generación completa ----
+void siguienteGeneracion() {
+  Individuo[] nueva = new Individuo[N];
+
+  for (int i = 0; i < N; i++) {
+    // 1. SELECCIÓN: elige dos padres según su aptitud
+    Individuo p1 = seleccionar(); // Padre 1
+    Individuo p2 = seleccionar(); // Padre 2
+
+    // 2. CRUZAMIENTO: combina los padres para crear un hijo
+    Individuo hijo = cruzar(p1, p2);
+
+    // 3. MUTACIÓN: con cierta probabilidad, perturba al hijo
+    //    Esto mantiene diversidad y evita la convergencia prematura
+    //    (quedarse atascado en un mínimo local)
+    if (random(1.0) < MUT_PROB) {
+      hijo = mutar(hijo);
+    }
+
+    nueva[i] = hijo;
+  }
+
+  // 4. REINSERCIÓN GENERACIONAL: la nueva generación reemplaza
+  poblacion = nueva;
+  generacion++;
+}
+
+// ---- SELECCIÓN POR RULETA ----
+// Cada individuo tiene probabilidad proporcional a su aptitud.
+// Como queremos MINIMIZAR, invertimos el fitness: fit_sel = 1/(1+f(x))
+// fitness bajo -> probabilidad alta de ser elegido padre.
+
+// Ejemplo: f=0 -> fit_sel=1.0 (máxima chance)
+//          f=10 -> fit_sel=0.09 (poca chance)
+//          f=100 -> fit_sel=0.01 (casi ninguna chance)
+Individuo seleccionarRuleta() {
+  // Calcula la suma total de fitness de selección
+  float suma = 0;
+  float[] fs = new float[N];
+  for (int i = 0; i < N; i++) {
+    fs[i] = 1.0 / (1.0 + poblacion[i].fit); // Inviertir = minimizar
+    suma += fs[i];
+  }
+
+  // Gira la "ruleta": elige un punto aleatorio en [0, suma]
+  float r    = random(suma);
+  float acum = 0;
+  for (int i = 0; i < N; i++) {
+    acum += fs[i];
+    if (acum >= r) return poblacion[i];
+  }
+  return poblacion[N - 1]; // fallback por seguridad numérica
+}
+
+// ---- SELECCIÓN POR TORNEO ----
+// Elige K individuos al azar y retorna el mejor de ellos.
+// K alto -> más presión selectiva (converge rápido, riesgo de convergencia prematura)
+// K bajo  -> menos presión selectiva (más exploración, converge más lento)
+Individuo seleccionarTorneo() {
+  Individuo mejor = poblacion[(int)random(N)];
+  for (int k = 1; k < K; k++) {
+    Individuo candidato = poblacion[(int)random(N)];
+    if (candidato.fit < mejor.fit) { // fit menor = mejor (minimizamos)
+      mejor = candidato;
+    }
+  }
+  return mejor;
+}
+// Ruleta: Todos tienen chance. Individuos malos igual pueden ser elegidos (raramente). Más diversidad, converge más lento.
+//
+// Torneo: Solo compiten K individuos. Más agresivo. Converge más rápido pero puede perder diversidad si K es alto.
+
+// ---- Selector: usa el metodo activo ----
+Individuo seleccionar() {
+  return RULETA ? seleccionarRuleta() : seleccionarTorneo();
+}
+
+// ---- CRUZAMIENTO PONDERADO ----
+// El hijo es combinación lineal de los dos padres:
+//   hijo.x = α * p1.x + (1-α) * p2.x
+//   hijo.y = α * p1.y + (1-α) * p2.y
+// donde α es aleatorio en [0,1] - decide "que tan parecido es al padre 1".
+// Si α=1 -> igual al padre 1. Si α=0 -> igual al padre 2.
+Individuo cruzar(Individuo p1, Individuo p2) {
+  float alpha = random(1.0);
+  float hx = alpha * p1.x + (1 - alpha) * p2.x;
+  float hy = alpha * p1.y + (1 - alpha) * p2.y;
+  return new Individuo(hx, hy);
+}
+
+// ---- MUTACIÓN GAUSSIANA ----
+// Agrega ruido gaussiano (normal) a la posición del individuo.
+// randomGaussian() retorna valores centrados en 0 con desviación ~1.
+// Multiplicamos por MUT_RANGO para controlar la magnitud del "salto".
+//
+// MUT_RANGO grande -> mutaciones grandes (más exploración, menos precisión)
+// MUT_RANGO pequeño -> mutaciones pequeñas (más precisión, menos exploración)
+//
+// Es lo mismo que Individuo::Mutacion del C++ con rango_mutacion.
+Individuo mutar(Individuo ind) {
+  float nx = ind.x + randomGaussian() * MUT_RANGO;
+  float ny = ind.y + randomGaussian() * MUT_RANGO;
+  return new Individuo(nx, ny); // constrain al dominio ocurre en el constructor
+}
+
+// Cruzamiento: El hijo siempre queda entre los dos padres. No puede explorar fuera de su rango. Por eso existe la mutación.
+//
+// Mutación: randomGaussian() da valores cercanos a 0 la mayoría del tiempo - saltos pequeños frecuentes, saltos grandes raros.
+
+// =====================================================================
+// VISUALIZACIÓN
+// =====================================================================
+
+// ---- Dibuja el mejor global (cruz roja) y el minimo teorico (verde) ----
+void mostrarBest() {
+  // Mejor encontrado: cruz roja
+  float bx = x2px(gbestx);
+  float by = y2py(gbesty);
+  stroke(255, 0, 0);
+  strokeWeight(2);
+  line(bx - 10, by, bx + 10, by);
+  line(bx, by - 10, bx, by + 10);
+  noFill();
+  ellipse(bx, by, 18, 18);
+
+  // Mínimo teórico en (0,0): circulo verde para comparar visualmente
+  stroke(0, 255, 150);
+  strokeWeight(1.5);
+  ellipse(x2px(0), y2py(0), 14, 14);
+
+  strokeWeight(1);
+  noStroke();
+}
+
+// ---- Muestra estadísticas en pantalla ----
+void mostrarInfo() {
+  // Fondo semitransparente para legibilidad
+  fill(0, 0, 0, 160);
+  noStroke();
+  rect(8, 8, 235, 100, 6);
+
+  // Datos del algoritmo
+  PFont f = createFont("Monospaced", 13, true);
+  textFont(f, 13);
+  fill(0, 255, 0);
+  textAlign(LEFT);
+  text("Generacion:   " + generacion + " / " + MAX_GEN,         16, 26);
+  text("Poblacion:    " + N,                                     16, 42);
+  text("Seleccion:    " + (RULETA ? "Ruleta" : "Torneo K="+K),  16, 58);
+  text("gBest f(x,y): " + nf(gbest, 1, 4),                     16, 74);
+  text("  en (" + nf(gbestx,1,2) + " , " + nf(gbesty,1,2) + ")", 16, 90);
+
+  // Instrucciones
+  fill(200);
+  textSize(11);
+  textAlign(CENTER);
+  text("ESPACIO: paso  |  A: auto/pausa  |  R: reset  |  T: cambiar selección", width/2, height - 10);
+}
+
+// ---- Genera la imagen de fondo con el mapa de calor de Rastrigin ----
+// Aqui calculamos directamente de la función Rastrigin.
+// Azul oscuro = valor bajo (minimos), rojo = valor alto (maximos).
+PImage generarMapaCalor() {
+  PImage img = createImage(width, height, RGB);
+  img.loadPixels();
+
+  // Primera pasada: calcular todos los valores y encontrar el rango
+  float minF =  Float.MAX_VALUE;
+  float maxF = -Float.MAX_VALUE;
+  float[][] vals = new float[width][height];
+
+  for (int px = 0; px < width; px++) {
+    for (int py = 0; py < height; py++) {
+      float x = map(px, 0, width,  X_MIN, X_MAX);
+      float y = map(py, 0, height, Y_MAX, Y_MIN); // Y invertido (px 0 = arriba)
+      float fv = 20 + (x*x - 10*cos(TWO_PI*x)) + (y*y - 10*cos(TWO_PI*y));
+      vals[px][py] = fv;
+      if (fv < minF) minF = fv;
+      if (fv > maxF) maxF = fv;
+    }
+  }
+
+  // Segunda pasada: colorear segun el valor normalizado
+  for (int px = 0; px < width; px++) {
+    for (int py = 0; py < height; py++) {
+      float t = map(vals[px][py], minF, maxF, 0, 1);
+      img.pixels[py * width + px] = colorCalor(t);
+    }
+  }
+  img.updatePixels();
+  return img;
+}
+
+// ---- Paleta de colores del mapa de calor ----
+// t=0 (mínimo global) -> azul oscuro
+// t=0.5              -> verde
+// t=1 (máximo)       -> rojo
+color colorCalor(float t) {
+  if (t < 0.33) return lerpColor(color(10, 30, 120),  color(20, 180, 80),  map(t, 0, 0.33, 0, 1));
+  if (t < 0.66) return lerpColor(color(20, 180, 80),  color(240, 200, 20), map(t, 0.33, 0.66, 0, 1));
+               return lerpColor(color(240, 200, 20), color(200, 20, 20),  map(t, 0.66, 1.0, 0, 1));
+}
+
+// ---- Conversiones dominio ↔ píxel ----
+float x2px(float x) { return map(x, X_MIN, X_MAX, 0, width); }
+float y2py(float y) { return map(y, Y_MIN, Y_MAX, height, 0); } // Y invertido
+
+// =====================================================================
+// CONTROLES DE TECLADO
+// =====================================================================
+void keyPressed() {
+  if (key == ' ') {
+    // Avanza UNA generación manualmente (útil para ver el proceso paso a paso)
+    if (generacion < MAX_GEN) siguienteGeneracion();
+  }
+  if (key == 'a' || key == 'A') {
+    // Activa o pausa el modo automático (avanza sola)
+    corriendo = !corriendo;
+  }
+  if (key == 'r' || key == 'R') {
+    // Reinicia todo desde cero con nueva población aleatoria
+    inicializar();
+    surf = generarMapaCalor(); // recalcula si cambiaste dominio
+  }
+  if (key == 't' || key == 'T') {
+    // Alterna entre selección por Ruleta y por Torneo
+    RULETA = !RULETA;
+  }
+}
