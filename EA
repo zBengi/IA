@@ -12,29 +12,53 @@
 // -----------------------------------------------------------------------
 // PARÁMETROS DEL ALGORITMO (ajustables)
 // -----------------------------------------------------------------------
-int    N         = 100;   // tamaño de la población
-int    MAX_GEN   = 200;   // generaciones máximas
-float  MUT_RANGO = 0.3;   // desviación estándar de la mutación gaussiana
-                          // (qué tan lejos puede "saltar" un individuo)
-float  MUT_PROB  = 0.2;   // probabilidad de que un hijo mute (0.0 a 1.0)
-int    K         = 5;     // tamaño del torneo (si se usa torneo)
-boolean RULETA   = true;  // true = Ruleta, false = Torneo
+int     N         = 100;   // tamaño de la población
+int     MAX_GEN   = 200;   // generaciones máximas
+float   MUT_RANGO = 0.3;   // desviación estándar de la mutación gaussiana
+                           // (qué tan lejos puede "saltar" un individuo)
+float   MUT_PROB  = 0.2;   // probabilidad de que un hijo mute (0.0 a 1.0)
+int     K         = 5;     // tamaño del torneo (si se usa torneo)
+boolean RULETA    = true;  // true = Ruleta, false = Torneo
 
 // -----------------------------------------------------------------------
-// DOMINIO DE BÚSQUEDA (rango -3 a 7)
+// DOMINIO DE BÚSQUEDA (rango -3 a 7 según el enunciado)
 // -----------------------------------------------------------------------
 float X_MIN = -3, X_MAX = 7;
 float Y_MIN = -3, Y_MAX = 7;
 
 // -----------------------------------------------------------------------
+// MÁRGENES — reservan espacio en los bordes del canvas para los ejes.
+// El mapa de calor y los individuos se dibujan DENTRO de estos márgenes,
+// así las coordenadas reales (-3 a 7) quedan alineadas con la imagen.
+// -----------------------------------------------------------------------
+int MARGEN_IZQ = 45;  // espacio para las etiquetas del eje Y (izquierda)
+int MARGEN_INF = 35;  // espacio para las etiquetas del eje X (abajo)
+int MARGEN_SUP = 10;  // pequeño margen superior
+int MARGEN_DER = 10;  // pequeño margen derecho
+
+// -----------------------------------------------------------------------
 // ESTADO GLOBAL
 // -----------------------------------------------------------------------
-Individuo[] poblacion;  // arreglo de individuos
-float gbestx, gbesty;   // coordenadas del mejor global encontrado
-float gbest;            // fitness del mejor global (queremos minimizar)
-int   generacion = 0;   // contador de generaciones
+Individuo[] poblacion;     // arreglo de individuos (como fl[] en el PSO)
+float gbestx, gbesty;      // coordenadas del mejor global encontrado
+float gbest;               // fitness del mejor global (queremos minimizar)
+int   generacion = 0;      // contador de generaciones
 boolean corriendo = false; // controla si avanza automáticamente
-float d = 8;            // diámetro de cada individuo en pantalla
+float d = 8;               // diámetro de cada individuo en pantalla
+
+// -----------------------------------------------------------------------
+// LOG — acumula el estado de CADA individuo en CADA generación.
+// Al terminar se exporta automáticamente a Excel sin pasos manuales.
+//
+// Columnas guardadas por fila:
+//   generacion, individuo_id, x, y, fitness,
+//   seleccion, mut_rango, mut_prob, k_torneo,
+//   gbest_fitness, gbest_x, gbest_y
+// -----------------------------------------------------------------------
+ArrayList<String> logLineas;  // lista de filas CSV en memoria
+boolean yaGuardo  = false;    // true cuando ya se activó el guardado
+boolean guardando = false;    // true mientras Python todavía está corriendo
+String  rutaExcel = "";       // ruta del .xlsx generado, para mostrar en pantalla
 
 // -----------------------------------------------------------------------
 // IMAGEN DE FONDO (mapa de calor de Rastrigin, generada en setup)
@@ -45,10 +69,11 @@ PImage surf;
 // CLASE INDIVIDUO
 // Equivalente a la clase Particle del PSO, pero para EA.
 // Un individuo es simplemente una posición (x, y) en el espacio de búsqueda.
+// No tiene velocidad como en PSO — se mueve mediante cruzamiento y mutación.
 // =====================================================================
 class Individuo {
   float x, y;  // posición actual = la "solución" que representa
-  float fit;   // fitness = f(x,y) de Rastrigin (que sea lo más bajo posible)
+  float fit;   // fitness = f(x,y) de Rastrigin (queremos que sea lo más bajo posible)
 
   // ---- Constructor: posición aleatoria dentro del dominio ----
   Individuo() { // nace en posicion aleatoria
@@ -73,7 +98,7 @@ class Individuo {
         + (x*x - 10*cos(TWO_PI*x)) // Rastrigin en x
         + (y*y - 10*cos(TWO_PI*y)); // Rastrigin en y
 
-    // Mejor global encontrado hasta ahora?
+    // ¿Es el mejor global encontrado hasta ahora?
     if (fit < gbest) {
       gbest  = fit;
       gbestx = x;
@@ -89,7 +114,7 @@ class Individuo {
     float t = constrain(map(fit, 0, 80, 0, 1), 0, 1);
     color c = lerpColor(
       color(255, 220, 50, 220), // Amarillo = bueno (fit bajo)
-      color(30, 80, 200, 150), // Azul = malo (fit alto)
+      color(30, 80, 200, 150),  // Azul = malo (fit alto)
       t);
     fill(c);
     noStroke();
@@ -101,27 +126,55 @@ class Individuo {
 // SETUP - se ejecuta una sola vez al inicio
 // =====================================================================
 void setup() {
-  size(800, 600); 
+  size(860, 660); // más ancho que antes para dar espacio a los márgenes de los ejes
+
+  // Inicializa el log con la cabecera CSV.
+  // Estas columnas son exactamente las que aparecerán en el Excel.
+  logLineas = new ArrayList<String>();
+  logLineas.add(
+    "generacion,individuo_id,x,y,fitness," +
+    "seleccion,mut_rango,mut_prob,k_torneo," +
+    "gbest_fitness,gbest_x,gbest_y"
+  );
+
   surf = generarMapaCalor(); // Genera la imagen de fondo (mapa de calor de Rastrigin)
-  inicializar(); // Inicializa la poblacion y el mejor global
+  inicializar();             // Inicializa la poblacion y el mejor global
 }
 
 // =====================================================================
 // DRAW - se ejecuta en loop
 // =====================================================================
 void draw() {
-  image(surf, 0, 0, width, height); // Dibuja el mapa de calor
+  background(30);
 
+  // Dibuja el mapa de calor DENTRO del área acotada por los márgenes.
+  // Así el mapa queda alineado con los ejes que se dibujan después.
+  image(surf, MARGEN_IZQ, MARGEN_SUP,
+        width - MARGEN_IZQ - MARGEN_DER,
+        height - MARGEN_INF - MARGEN_SUP);
+
+  // Dibuja los ejes con las coordenadas reales del dominio (-3 a 7)
+  dibujarEjes();
+
+  // Dibuja cada individuo de la población
   for (Individuo ind : poblacion) {
-    ind.display(); // Dibuja cada individuo de la población
+    ind.display();
   }
 
-  mostrarBest(); // Dibuja el mejor global (cruz roja)
-  mostrarInfo(); // Muestra estadísticas en pantalla
+  mostrarBest(); // Dibuja el mejor global (cruz roja) y el mínimo teórico (verde)
+  mostrarInfo(); // Muestra estadísticas y estado del log en pantalla
 
   // Si está en modo automatico, avanza una generación por frame
   if (corriendo && generacion < MAX_GEN) {
     siguienteGeneracion();
+  }
+
+  // Al llegar a MAX_GEN dispara la generación del Excel una sola vez.
+  // El flag yaGuardo evita que se llame más de una vez aunque draw() siga corriendo.
+  if (generacion >= MAX_GEN && !yaGuardo) {
+    yaGuardo  = true;
+    guardando = true;
+    generarExcelAutomatico();
   }
 }
 
@@ -137,13 +190,28 @@ void inicializar() {
   gbesty     = 0;
   generacion = 0;
   corriendo  = false;
+  yaGuardo   = guardando = false; // permite volver a generar el Excel en la próxima corrida
+  rutaExcel  = "";
+
+  // Limpia el log y repone la cabecera CSV
+  logLineas.clear();
+  logLineas.add(
+    "generacion,individuo_id,x,y,fitness," +
+    "seleccion,mut_rango,mut_prob,k_torneo," +
+    "gbest_fitness,gbest_x,gbest_y"
+  );
 
   for (int i = 0; i < N; i++) {
     poblacion[i] = new Individuo(); // posicion aleatoria
   }
+
+  // Registra la generación 0 (población inicial) en el log
+  // (permite ver en el Excel cómo era la distribución inicial)
+  registrarGeneracion();
 }
 
 // ---- Ejecuta una generación completa ----
+// Esto equivale al bloque "ALGORITMO EVOLUTIVO" del main.cpp
 void siguienteGeneracion() {
   Individuo[] nueva = new Individuo[N];
 
@@ -165,36 +233,295 @@ void siguienteGeneracion() {
     nueva[i] = hijo;
   }
 
-  // 4. REINSERCIÓN GENERACIONAL: la nueva generación reemplaza
+  // 4. REINSERCIÓN GENERACIONAL: la nueva generación reemplaza completamente a la vieja
   poblacion = nueva;
   generacion++;
+
+  // Guarda el estado de esta generación en el log
+  registrarGeneracion();
 }
+
+// ---- REGISTRO: guarda todos los individuos de la generación actual en el log ----
+// Cada individuo genera una fila CSV con su posición, fitness y metadatos
+// de los parámetros usados (selección, mutación, etc.).
+// Esto permite reconstruir toda la evolución después en Excel.
+void registrarGeneracion() {
+  String sel = RULETA ? "Ruleta" : "Torneo";
+  for (int i = 0; i < poblacion.length; i++) {
+    Individuo ind = poblacion[i];
+    // Una fila por individuo: sus datos + los parámetros del algoritmo en ese momento
+    logLineas.add(
+      generacion           + "," + i                    + "," +
+      nf(ind.x,    1, 6)  + "," + nf(ind.y,    1, 6)  + "," +
+      nf(ind.fit,  1, 6)  + "," + sel                  + "," +
+      nf(MUT_RANGO, 1, 3) + "," + nf(MUT_PROB,  1, 3) + "," +
+      K                   + "," + nf(gbest,    1, 6)   + "," +
+      nf(gbestx,   1, 6)  + "," + nf(gbesty,   1, 6)
+    );
+  }
+}
+
+// =====================================================================
+// GENERACIÓN AUTOMÁTICA DEL EXCEL
+//
+// Todo ocurre sin intervención del usuario:
+//   1. Guarda ea_log.csv en la carpeta data/ del sketch
+//   2. Escribe el script Python (make_excel.py) en esa misma carpeta.
+//      El script está embebido como String dentro del .pde — no necesitas
+//      tener ningún archivo externo, solo Python 3 instalado.
+//   3. Ejecuta Python con Runtime.exec() en un HILO SEPARADO para no
+//      congelar el sketch mientras se genera el Excel.
+//   4. El script imprime "EXCEL_OK:<ruta>" al terminar. Processing lo
+//      detecta, muestra la ruta en pantalla y abre el explorador de archivos.
+// =====================================================================
+void generarExcelAutomatico() {
+
+  // 1 — Guarda el CSV con todos los logs acumulados
+  String csvPath  = sketchPath("data/ea_log.csv");
+  String xlsxPath = sketchPath("EA_Resultados.xlsx");
+  rutaExcel = xlsxPath; // guardamos la ruta para mostrarla en pantalla
+  saveStrings("ea_log.csv", logLineas.toArray(new String[0]));
+  println("CSV guardado: " + csvPath);
+
+  // 2 — Script Python embebido como String multilínea.
+  //     Se escribe en data/make_excel.py y se ejecuta una sola vez.
+  //     Si openpyxl no está instalado, lo instala automáticamente con pip.
+  //     El script genera 3 hojas:
+  //       - Logs              : datos crudos (una fila por individuo por gen)
+  //       - Resumen           : min/max/promedio/desv por generación
+  //       - Comparacion Configs: tabla para completar con distintos experimentos
+  String py =
+    "import sys, csv, math\n" +
+    // Intenta importar openpyxl; si no está, lo instala y reintenta
+    "try:\n" +
+    "    from openpyxl import Workbook\n" +
+    "    from openpyxl.styles import Font, PatternFill, Alignment\n" +
+    "    from openpyxl.utils import get_column_letter\n" +
+    "except ImportError:\n" +
+    "    import subprocess\n" +
+    "    subprocess.check_call([sys.executable,'-m','pip','install','openpyxl','-q'])\n" +
+    "    from openpyxl import Workbook\n" +
+    "    from openpyxl.styles import Font, PatternFill, Alignment\n" +
+    "    from openpyxl.utils import get_column_letter\n" +
+    "\n" +
+    // Rutas recibidas como argumentos desde Processing
+    "csv_path  = sys.argv[1]\n" +
+    "xlsx_path = sys.argv[2]\n" +
+    "\n" +
+    // Lee todas las filas del CSV generado por Processing
+    "rows = []\n" +
+    "with open(csv_path, newline='', encoding='utf-8') as f:\n" +
+    "    for row in csv.DictReader(f): rows.append(row)\n" +
+    "\n" +
+    "wb = Workbook()\n" +
+    "\n" +
+    // Helper: escribe una celda de cabecera con fondo azul y texto blanco
+    "def hdr(ws, r, c, v, bg='2E75B6', fg='FFFFFF'):\n" +
+    "    cell = ws.cell(r, c, v)\n" +
+    "    cell.font      = Font(name='Arial', bold=True, color=fg, size=10)\n" +
+    "    cell.fill      = PatternFill('solid', start_color=bg)\n" +
+    "    cell.alignment = Alignment(horizontal='center', vertical='center')\n" +
+    "\n" +
+    // Helper: escribe una celda de dato con formato y color de fondo opcionales
+    "def dat(ws, r, c, v, fmt=None, bg=None):\n" +
+    "    cell = ws.cell(r, c, v)\n" +
+    "    cell.font      = Font(name='Arial', size=10)\n" +
+    "    cell.alignment = Alignment(horizontal='center', vertical='center')\n" +
+    "    if fmt: cell.number_format = fmt\n" +
+    "    if bg:  cell.fill = PatternFill('solid', start_color=bg)\n" +
+    "\n" +
+    "GRIS = 'F2F2F2'\n" +
+    "\n" +
+    // ── HOJA 1: Logs — datos crudos, una fila por individuo por generación ──
+    "ws1 = wb.active\n" +
+    "ws1.title = 'Logs'\n" +
+    "cols   = ['generacion','individuo_id','x','y','fitness',\n" +
+    "          'seleccion','mut_rango','mut_prob','k_torneo',\n" +
+    "          'gbest_fitness','gbest_x','gbest_y']\n" +
+    "widths = [13,13,12,12,14,12,12,12,10,15,12,12]\n" +
+    "for c,(name,w) in enumerate(zip(cols,widths),1):\n" +
+    "    hdr(ws1,1,c,name)\n" +
+    "    ws1.column_dimensions[get_column_letter(c)].width = w\n" +
+    "for r,row in enumerate(rows,2):\n" +
+    "    bg = GRIS if r%2==0 else 'FFFFFF'\n" +
+    "    for c,key in enumerate(cols,1):\n" +
+    "        v = row.get(key,'')\n" +
+    "        try: v = float(v)\n" +
+    "        except: pass\n" +
+    "        dat(ws1,r,c,v, fmt='0.000000' if isinstance(v,float) else None, bg=bg)\n" +
+    "ws1.freeze_panes = 'A2'\n" +
+    "\n" +
+    // ── HOJA 2: Resumen por generación — agrega los datos en Python
+    //    (más robusto que fórmulas Excel para archivos grandes)
+    "ws2 = wb.create_sheet('Resumen por Generacion')\n" +
+    "for c,(name,w) in enumerate(zip(\n" +
+    "    ['Generacion','Fitness Min','Fitness Max','Fitness Promedio',\n" +
+    "     'Desv Estandar','gBest acumulado','gBest X','gBest Y'],\n" +
+    "    [14,14,14,16,16,18,12,12]),1):\n" +
+    "    hdr(ws2,1,c,name)\n" +
+    "    ws2.column_dimensions[get_column_letter(c)].width = w\n" +
+    "\n" +
+    // Agrupa las filas por generación y calcula estadísticas
+    "from collections import defaultdict\n" +
+    "gen_data = defaultdict(list)\n" +
+    "gen_gbest, gen_gbest_xy = {}, {}\n" +
+    "for row in rows:\n" +
+    "    g  = int(row['generacion'])\n" +
+    "    f  = float(row['fitness'])\n" +
+    "    gb = float(row['gbest_fitness'])\n" +
+    "    gen_data[g].append(f)\n" +
+    "    if g not in gen_gbest or gb < gen_gbest[g]:\n" +
+    "        gen_gbest[g]    = gb\n" +
+    "        gen_gbest_xy[g] = (float(row['gbest_x']), float(row['gbest_y']))\n" +
+    "\n" +
+    "for off,g in enumerate(sorted(gen_data.keys()),2):\n" +
+    "    fits = gen_data[g]; n = len(fits); mean = sum(fits)/n\n" +
+    "    std  = math.sqrt(sum((v-mean)**2 for v in fits)/n) if n>1 else 0.0\n" +
+    "    bg   = GRIS if off%2==0 else 'FFFFFF'\n" +
+    "    dat(ws2,off,1,g, bg=bg)\n" +
+    "    dat(ws2,off,2,round(min(fits),6),    fmt='0.000000', bg=bg)\n" +
+    "    dat(ws2,off,3,round(max(fits),6),    fmt='0.000000', bg=bg)\n" +
+    "    dat(ws2,off,4,round(mean,6),          fmt='0.000000', bg=bg)\n" +
+    "    dat(ws2,off,5,round(std,6),           fmt='0.000000', bg=bg)\n" +
+    "    dat(ws2,off,6,round(gen_gbest[g],6),  fmt='0.000000', bg=bg)\n" +
+    "    dat(ws2,off,7,round(gen_gbest_xy[g][0],6), fmt='0.000000', bg=bg)\n" +
+    "    dat(ws2,off,8,round(gen_gbest_xy[g][1],6), fmt='0.000000', bg=bg)\n" +
+    "ws2.freeze_panes = 'B2'\n" +
+    "\n" +
+    // ── HOJA 3: Comparación de configs — para llenar manualmente con distintos experimentos
+    "ws3 = wb.create_sheet('Comparacion Configs')\n" +
+    "for c,(name,w) in enumerate(zip(\n" +
+    "    ['Experimento','Seleccion','N','Mut Rango','Mut Prob','K','gBest final','gBest X','gBest Y'],\n" +
+    "    [20,12,8,12,12,8,14,12,12]),1):\n" +
+    "    hdr(ws3,1,c,name)\n" +
+    "    ws3.column_dimensions[get_column_letter(c)].width = w\n" +
+    "for r,(nombre,sel,n,mr,mp,k) in enumerate([\n" +
+    "    ('Config 1 - base',         'Ruleta',100,0.3,0.2, 5),\n" +
+    "    ('Config 2 - alta mutacion','Ruleta',100,1.0,0.5, 5),\n" +
+    "    ('Config 3 - baja mutacion','Ruleta',100,0.1,0.1, 5),\n" +
+    "    ('Config 4 - torneo K=5',   'Torneo',100,0.3,0.2, 5),\n" +
+    "    ('Config 5 - torneo K=15',  'Torneo',100,0.3,0.2,15),\n" +
+    "    ('Config 6 - pob pequena',  'Ruleta', 30,0.3,0.2, 5),\n" +
+    "    ('Config 7 - pob grande',   'Ruleta',300,0.3,0.2, 5),\n" +
+    "],2):\n" +
+    "    bg = 'E2EFDA' if r%2==0 else 'FFFFFF'\n" +
+    "    for c,v in enumerate([nombre,sel,n,mr,mp,k],1): dat(ws3,r,c,v,bg=bg)\n" +
+    // Celdas amarillas = completar manualmente con el gBest de cada experimento
+    "    for c in [7,8,9]:\n" +
+    "        cell = ws3.cell(r,c,'completar')\n" +
+    "        cell.fill      = PatternFill('solid',start_color='FFF2CC')\n" +
+    "        cell.font      = Font(name='Arial',color='808080',italic=True,size=9)\n" +
+    "        cell.alignment = Alignment(horizontal='center')\n" +
+    "\n" +
+    "wb.save(xlsx_path)\n" +
+    // Señal de éxito que Processing espera leer en la salida del proceso
+    "print('EXCEL_OK:' + xlsx_path)\n";
+
+  // 3 — Escribe el script Python en data/make_excel.py
+  String pyPath = sketchPath("data/make_excel.py");
+  saveStrings(pyPath, new String[]{ py });
+
+  // 4 — Ejecuta Python en un HILO SEPARADO con Runtime.exec().
+  //     Usar un hilo evita que el sketch se congele mientras Python trabaja.
+  //     En Windows usa "cmd /c python ..."; en Mac/Linux prueba python3 primero.
+  final String csvF = csvPath, xlF = xlsxPath, pyF = pyPath;
+  new Thread(new Runnable() {
+    public void run() {
+      try {
+        // Arma el comando según el sistema operativo
+        String[] cmd;
+        String os = System.getProperty("os.name").toLowerCase();
+        if (os.contains("win")) {
+          // Windows: un solo comando a través de cmd
+          cmd = new String[]{ "cmd", "/c",
+            "python \"" + pyF + "\" \"" + csvF + "\" \"" + xlF + "\"" };
+        } else {
+          // Mac/Linux: intenta python3 primero, luego python como fallback
+          cmd = new String[]{ "/bin/sh", "-c",
+            "python3 \"" + pyF + "\" \"" + csvF + "\" \"" + xlF +
+            "\" 2>&1 || python \"" + pyF + "\" \"" + csvF + "\" \"" + xlF + "\" 2>&1" };
+        }
+
+        Process p = Runtime.getRuntime().exec(cmd);
+
+        // Lee la salida estándar del proceso línea a línea.
+        // Cuando Python imprime "EXCEL_OK:<ruta>", sabemos que terminó bien.
+        java.io.BufferedReader br = new java.io.BufferedReader(
+            new java.io.InputStreamReader(p.getInputStream()));
+        boolean ok = false;
+        String line;
+        while ((line = br.readLine()) != null) {
+          println("[py] " + line);
+          if (line.startsWith("EXCEL_OK:")) ok = true;
+        }
+        p.waitFor(); // espera a que el proceso termine antes de continuar
+        guardando = false;
+
+        if (ok) {
+          println("Excel listo en: " + xlF);
+          abrirCarpeta(xlF); // abre el explorador de archivos en la carpeta
+        } else {
+          // Si Python falló, muestra el error en el panel de info
+          rutaExcel = "ERROR generando Excel — revisa la consola de Processing";
+        }
+
+      } catch (Exception e) {
+        guardando = false;
+        rutaExcel = "ERROR: " + e.getMessage();
+        println("Excepcion ejecutando Python: " + e.getMessage());
+      }
+    }
+  }).start();
+}
+
+// ---- Abre el explorador de archivos apuntando a la carpeta del Excel ----
+// Multiplataforma: Explorer en Windows, Finder en Mac, xdg-open en Linux.
+void abrirCarpeta(String filePath) {
+  try {
+    String os = System.getProperty("os.name").toLowerCase();
+    if (os.contains("win")) {
+      // Windows: /select resalta el archivo dentro del Explorer
+      Runtime.getRuntime().exec("explorer /select,\"" + filePath + "\"");
+    } else if (os.contains("mac")) {
+      // macOS: -R (reveal) resalta el archivo en Finder
+      Runtime.getRuntime().exec(new String[]{ "open", "-R", filePath });
+    } else {
+      // Linux: abre la carpeta contenedora con el gestor de archivos por defecto
+      String carpeta = filePath.substring(0, filePath.lastIndexOf("/"));
+      Runtime.getRuntime().exec(new String[]{ "xdg-open", carpeta });
+    }
+  } catch (Exception e) {
+    println("No se pudo abrir la carpeta: " + e.getMessage());
+  }
+}
+
+// =====================================================================
+// SELECCIÓN
+// =====================================================================
 
 // ---- SELECCIÓN POR RULETA ----
 // Cada individuo tiene probabilidad proporcional a su aptitud.
 // Como queremos MINIMIZAR, invertimos el fitness: fit_sel = 1/(1+f(x))
 // fitness bajo -> probabilidad alta de ser elegido padre.
-
-// Ejemplo: f=0 -> fit_sel=1.0 (máxima chance)
-//          f=10 -> fit_sel=0.09 (poca chance)
+//
+// Ejemplo: f=0   -> fit_sel=1.0  (máxima chance)
+//          f=10  -> fit_sel=0.09 (poca chance)
 //          f=100 -> fit_sel=0.01 (casi ninguna chance)
 Individuo seleccionarRuleta() {
   // Calcula la suma total de fitness de selección
   float suma = 0;
   float[] fs = new float[N];
   for (int i = 0; i < N; i++) {
-    fs[i] = 1.0 / (1.0 + poblacion[i].fit); // Inviertir = minimizar
+    fs[i] = 1.0 / (1.0 + poblacion[i].fit); // invertir = minimizar
     suma += fs[i];
   }
-
   // Gira la "ruleta": elige un punto aleatorio en [0, suma]
-  float r    = random(suma);
-  float acum = 0;
+  float r = random(suma), acum = 0;
   for (int i = 0; i < N; i++) {
     acum += fs[i];
     if (acum >= r) return poblacion[i];
   }
-  return poblacion[N - 1]; // fallback por seguridad numérica
+  return poblacion[N-1]; // fallback por seguridad numérica
 }
 
 // ---- SELECCIÓN POR TORNEO ----
@@ -211,14 +538,20 @@ Individuo seleccionarTorneo() {
   }
   return mejor;
 }
-// Ruleta: Todos tienen chance. Individuos malos igual pueden ser elegidos (raramente). Más diversidad, converge más lento.
+// Ruleta: Todos tienen chance. Individuos malos igual pueden ser elegidos (raramente).
+//         Más diversidad, converge más lento.
 //
-// Torneo: Solo compiten K individuos. Más agresivo. Converge más rápido pero puede perder diversidad si K es alto.
+// Torneo: Solo compiten K individuos. Más agresivo. Converge más rápido
+//         pero puede perder diversidad si K es alto.
 
-// ---- Selector: usa el metodo activo ----
+// ---- Selector: usa el método activo ----
 Individuo seleccionar() {
   return RULETA ? seleccionarRuleta() : seleccionarTorneo();
 }
+
+// =====================================================================
+// CRUZAMIENTO Y MUTACIÓN
+// =====================================================================
 
 // ---- CRUZAMIENTO PONDERADO ----
 // El hijo es combinación lineal de los dos padres:
@@ -226,6 +559,8 @@ Individuo seleccionar() {
 //   hijo.y = α * p1.y + (1-α) * p2.y
 // donde α es aleatorio en [0,1] - decide "que tan parecido es al padre 1".
 // Si α=1 -> igual al padre 1. Si α=0 -> igual al padre 2.
+// Cruzamiento: El hijo siempre queda ENTRE los dos padres.
+//              No puede explorar fuera de su rango. Por eso existe la mutación.
 Individuo cruzar(Individuo p1, Individuo p2) {
   float alpha = random(1.0);
   float hx = alpha * p1.x + (1 - alpha) * p2.x;
@@ -242,94 +577,152 @@ Individuo cruzar(Individuo p1, Individuo p2) {
 // MUT_RANGO pequeño -> mutaciones pequeñas (más precisión, menos exploración)
 //
 // Es lo mismo que Individuo::Mutacion del C++ con rango_mutacion.
+// Mutación: randomGaussian() da valores cercanos a 0 la mayoría del tiempo
+//           - saltos pequeños frecuentes, saltos grandes raros.
 Individuo mutar(Individuo ind) {
   float nx = ind.x + randomGaussian() * MUT_RANGO;
   float ny = ind.y + randomGaussian() * MUT_RANGO;
   return new Individuo(nx, ny); // constrain al dominio ocurre en el constructor
 }
 
-// Cruzamiento: El hijo siempre queda entre los dos padres. No puede explorar fuera de su rango. Por eso existe la mutación.
-//
-// Mutación: randomGaussian() da valores cercanos a 0 la mayoría del tiempo - saltos pequeños frecuentes, saltos grandes raros.
-
 // =====================================================================
 // VISUALIZACIÓN
 // =====================================================================
 
-// ---- Dibuja el mejor global (cruz roja) y el minimo teorico (verde) ----
-void mostrarBest() {
-  // Mejor encontrado: cruz roja
-  float bx = x2px(gbestx);
-  float by = y2py(gbesty);
-  stroke(255, 0, 0);
-  strokeWeight(2);
-  line(bx - 10, by, bx + 10, by);
-  line(bx, by - 10, bx, by + 10);
-  noFill();
-  ellipse(bx, by, 18, 18);
+// ---- EJES CON COORDENADAS REALES (-3 a 7) ----
+// Dibuja las líneas de los ejes, los ticks (marcas) cada unidad entera,
+// y las etiquetas numéricas en los bordes del canvas.
+// Los MÁRGENES definidos arriba son los que crean el espacio para esto.
+// x2px() e y2py() usan esos mismos márgenes, así los puntos de la
+// población siempre quedan alineados visualmente con la escala.
+void dibujarEjes() {
+  stroke(180); strokeWeight(1); fill(180); textSize(10);
 
-  // Mínimo teórico en (0,0): circulo verde para comparar visualmente
-  stroke(0, 255, 150);
-  strokeWeight(1.5);
-  ellipse(x2px(0), y2py(0), 14, 14);
+  // Eje X (horizontal, en el borde inferior)
+  textAlign(CENTER, TOP);
+  line(MARGEN_IZQ, height-MARGEN_INF, width-MARGEN_DER, height-MARGEN_INF);
+  for (int v = (int)X_MIN; v <= (int)X_MAX; v++) {
+    float px = x2px(v);
+    line(px, height-MARGEN_INF, px, height-MARGEN_INF+5); // tick
+    text(v, px, height-MARGEN_INF+7);                     // etiqueta numérica
+  }
+  textAlign(CENTER, BOTTOM);
+  text("x", width/2, height-2); // nombre del eje
 
-  strokeWeight(1);
+  // Eje Y (vertical, en el borde izquierdo)
+  textAlign(RIGHT, CENTER);
+  line(MARGEN_IZQ, MARGEN_SUP, MARGEN_IZQ, height-MARGEN_INF);
+  for (int v = (int)Y_MIN; v <= (int)Y_MAX; v++) {
+    float py = y2py(v);
+    line(MARGEN_IZQ-5, py, MARGEN_IZQ, py); // tick
+    text(v, MARGEN_IZQ-7, py);              // etiqueta numérica
+  }
+  // Etiqueta "y" rotada 90° con pushMatrix/popMatrix para no afectar el resto
+  pushMatrix();
+  translate(12, height/2);
+  rotate(-HALF_PI);
+  textAlign(CENTER, CENTER);
+  text("y", 0, 0);
+  popMatrix();
+
   noStroke();
 }
 
-// ---- Muestra estadísticas en pantalla ----
+// ---- Dibuja el mejor global (cruz roja) y el mínimo teórico (verde) ----
+// Inspirado en despliegaBest() del PSO del profe
+void mostrarBest() {
+  // Mejor encontrado: cruz roja
+  float bx = x2px(gbestx), by = y2py(gbesty);
+  stroke(255,0,0); strokeWeight(2); noFill();
+  line(bx-10,by,bx+10,by);
+  line(bx,by-10,bx,by+10);
+  ellipse(bx,by,18,18);
+
+  // Mínimo teórico en (0,0): círculo verde para comparar visualmente
+  stroke(0,255,150); strokeWeight(1.5);
+  ellipse(x2px(0),y2py(0),14,14);
+
+  strokeWeight(1); noStroke();
+}
+
+// ---- Muestra estadísticas y estado del log en pantalla ----
+// El panel crece verticalmente cuando hay información del Excel para mostrar.
 void mostrarInfo() {
-  // Fondo semitransparente para legibilidad
-  fill(0, 0, 0, 160);
-  noStroke();
-  rect(8, 8, 235, 100, 6);
+  // Altura del panel: crece si hay algo que decir sobre el Excel
+  int panelH = (guardando || (!rutaExcel.isEmpty())) ? 145 : 105;
+  fill(0,0,0,160); noStroke();
+  rect(MARGEN_IZQ+8, MARGEN_SUP+8, 280, panelH, 6);
 
-  // Datos del algoritmo
   PFont f = createFont("Monospaced", 13, true);
-  textFont(f, 13);
-  fill(0, 255, 0);
-  textAlign(LEFT);
-  text("Generacion:   " + generacion + " / " + MAX_GEN,         16, 26);
-  text("Poblacion:    " + N,                                     16, 42);
-  text("Seleccion:    " + (RULETA ? "Ruleta" : "Torneo K="+K),  16, 58);
-  text("gBest f(x,y): " + nf(gbest, 1, 4),                     16, 74);
-  text("  en (" + nf(gbestx,1,2) + " , " + nf(gbesty,1,2) + ")", 16, 90);
+  textFont(f, 13); fill(0,255,0); textAlign(LEFT);
+  int lx = MARGEN_IZQ+16, ly = MARGEN_SUP+26;
+  text("Generacion:   " + generacion + " / " + MAX_GEN,           lx, ly);
+  text("Poblacion:    " + N,                                       lx, ly+16);
+  text("Seleccion:    " + (RULETA ? "Ruleta" : "Torneo K="+K),    lx, ly+32);
+  text("gBest f(x,y): " + nf(gbest, 1, 4),                       lx, ly+48);
+  text("  en (" + nf(gbestx,1,2) + " , " + nf(gbesty,1,2) + ")", lx, ly+64);
 
-  // Instrucciones
-  fill(200);
-  textSize(11);
-  textAlign(CENTER);
-  text("ESPACIO: paso  |  A: auto/pausa  |  R: reset  |  T: cambiar selección", width/2, height - 10);
+  // Estado del Excel — cambia según la fase del proceso
+  if (guardando) {
+    // Python está corriendo: muestra aviso en amarillo
+    fill(255,200,0); textSize(11);
+    text("Generando Excel...", lx, ly+88);
+  } else if (yaGuardo && !rutaExcel.isEmpty()) {
+    boolean esError = rutaExcel.startsWith("ERROR");
+    // Verde = éxito, rojo = error
+    fill(esError ? color(255,80,80) : color(80,255,120));
+    textSize(11);
+    text(esError ? rutaExcel : "Excel listo!", lx, ly+88);
+    if (!esError) {
+      // Muestra la ruta del archivo en dos líneas si es muy larga
+      fill(160); textSize(10);
+      String ruta = rutaExcel;
+      int corte = ruta.lastIndexOf(
+        System.getProperty("os.name").toLowerCase().contains("win") ? "\\" : "/");
+      text(ruta.substring(0, corte+1), lx, ly+104); // carpeta
+      text(ruta.substring(corte+1),   lx, ly+120);  // nombre del archivo
+    }
+  }
+
+  // Instrucciones al pie
+  fill(200); textSize(10); textAlign(CENTER);
+  text("ESPACIO: paso  |  A: auto/pausa  |  R: reset  |  T: cambiar selección  |  G: guardar ahora",
+       width/2, height-5);
 }
 
 // ---- Genera la imagen de fondo con el mapa de calor de Rastrigin ----
-// Aqui calculamos directamente de la función Rastrigin.
-// Azul oscuro = valor bajo (minimos), rojo = valor alto (maximos).
+// Calculamos directamente de la función Rastrigin en cada píxel.
+// Se hace en dos pasadas: primero encontrar el rango (min/max),
+// luego colorear normalizando entre 0 y 1.
+// Azul oscuro = valor bajo (mínimos), rojo = valor alto (máximos).
+// El tamaño de la imagen respeta los MÁRGENES para que el mapa
+// quede alineado con los ejes dibujados en dibujarEjes().
 PImage generarMapaCalor() {
-  PImage img = createImage(width, height, RGB);
+  int mw = width  - MARGEN_IZQ - MARGEN_DER;
+  int mh = height - MARGEN_INF - MARGEN_SUP;
+  PImage img = createImage(mw, mh, RGB);
   img.loadPixels();
 
   // Primera pasada: calcular todos los valores y encontrar el rango
   float minF =  Float.MAX_VALUE;
   float maxF = -Float.MAX_VALUE;
-  float[][] vals = new float[width][height];
-
-  for (int px = 0; px < width; px++) {
-    for (int py = 0; py < height; py++) {
-      float x = map(px, 0, width,  X_MIN, X_MAX);
-      float y = map(py, 0, height, Y_MAX, Y_MIN); // Y invertido (px 0 = arriba)
-      float fv = 20 + (x*x - 10*cos(TWO_PI*x)) + (y*y - 10*cos(TWO_PI*y));
+  float[][] vals = new float[mw][mh];
+  for (int px = 0; px < mw; px++) {
+    for (int py = 0; py < mh; py++) {
+      float x  = map(px, 0, mw, X_MIN, X_MAX);
+      float y  = map(py, 0, mh, Y_MAX, Y_MIN); // Y invertido (px 0 = arriba)
+      float fv = 20+(x*x-10*cos(TWO_PI*x))+(y*y-10*cos(TWO_PI*y));
       vals[px][py] = fv;
       if (fv < minF) minF = fv;
       if (fv > maxF) maxF = fv;
     }
   }
 
-  // Segunda pasada: colorear segun el valor normalizado
-  for (int px = 0; px < width; px++) {
-    for (int py = 0; py < height; py++) {
+  // Segunda pasada: colorear según el valor normalizado
+  for (int px = 0; px < mw; px++) {
+    for (int py = 0; py < mh; py++) {
       float t = map(vals[px][py], minF, maxF, 0, 1);
-      img.pixels[py * width + px] = colorCalor(t);
+      img.pixels[py * mw + px] = colorCalor(t);
     }
   }
   img.updatePixels();
@@ -338,8 +731,8 @@ PImage generarMapaCalor() {
 
 // ---- Paleta de colores del mapa de calor ----
 // t=0 (mínimo global) -> azul oscuro
-// t=0.5              -> verde
-// t=1 (máximo)       -> rojo
+// t=0.5               -> verde
+// t=1 (máximo)        -> rojo
 color colorCalor(float t) {
   if (t < 0.33) return lerpColor(color(10, 30, 120),  color(20, 180, 80),  map(t, 0, 0.33, 0, 1));
   if (t < 0.66) return lerpColor(color(20, 180, 80),  color(240, 200, 20), map(t, 0.33, 0.66, 0, 1));
@@ -347,8 +740,10 @@ color colorCalor(float t) {
 }
 
 // ---- Conversiones dominio ↔ píxel ----
-float x2px(float x) { return map(x, X_MIN, X_MAX, 0, width); }
-float y2py(float y) { return map(y, Y_MIN, Y_MAX, height, 0); } // Y invertido
+// Usan los MÁRGENES para que la posición (0,0) por ejemplo
+// caiga exactamente sobre el tick "0" de ambos ejes visuales.
+float x2px(float x) { return map(x, X_MIN, X_MAX, MARGEN_IZQ, width-MARGEN_DER); }
+float y2py(float y) { return map(y, Y_MIN, Y_MAX, height-MARGEN_INF, MARGEN_SUP); } // Y invertido
 
 // =====================================================================
 // CONTROLES DE TECLADO
@@ -357,18 +752,28 @@ void keyPressed() {
   if (key == ' ') {
     // Avanza UNA generación manualmente (útil para ver el proceso paso a paso)
     if (generacion < MAX_GEN) siguienteGeneracion();
+    // Si llegó al final con avance manual, también genera el Excel
+    if (generacion >= MAX_GEN && !yaGuardo) {
+      yaGuardo = guardando = true;
+      generarExcelAutomatico();
+    }
   }
-  if (key == 'a' || key == 'A') {
+  if (key=='a'||key=='A') {
     // Activa o pausa el modo automático (avanza sola)
     corriendo = !corriendo;
   }
-  if (key == 'r' || key == 'R') {
+  if (key=='r'||key=='R') {
     // Reinicia todo desde cero con nueva población aleatoria
     inicializar();
     surf = generarMapaCalor(); // recalcula si cambiaste dominio
   }
-  if (key == 't' || key == 'T') {
+  if (key=='t'||key=='T') {
     // Alterna entre selección por Ruleta y por Torneo
     RULETA = !RULETA;
+  }
+  if ((key=='g'||key=='G') && !yaGuardo) {
+    // Fuerza el guardado en cualquier momento (útil a mitad del experimento)
+    yaGuardo = guardando = true;
+    generarExcelAutomatico();
   }
 }
